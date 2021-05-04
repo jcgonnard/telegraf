@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/influxdata/tail"
-
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal/globpath"
 	"github.com/influxdata/telegraf/plugins/inputs"
@@ -138,8 +137,13 @@ func (l *LogParserPlugin) Description() string {
 	return "Stream and parse log file(s)."
 }
 
+func (l *LogParserPlugin) Init() error {
+	l.Log.Warnf(`The logparser plugin is deprecated; please use the 'tail' input with the 'grok' data_format`)
+	return nil
+}
+
 // Gather is the primary function to collect the metrics for the plugin
-func (l *LogParserPlugin) Gather(acc telegraf.Accumulator) error {
+func (l *LogParserPlugin) Gather(_ telegraf.Accumulator) error {
 	l.Lock()
 	defer l.Unlock()
 
@@ -267,7 +271,6 @@ func (l *LogParserPlugin) receiver(tailer *tail.Tail) {
 
 	var line *tail.Line
 	for line = range tailer.Lines {
-
 		if line.Err != nil {
 			l.Log.Errorf("Error tailing file %s, Error: %s",
 				tailer.Filename, line.Err)
@@ -317,7 +320,6 @@ func (l *LogParserPlugin) parser() {
 		} else {
 			l.Log.Errorf("Error parsing log line: %s", err.Error())
 		}
-
 	}
 }
 

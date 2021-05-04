@@ -1,17 +1,17 @@
 package http
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/internal/tls"
+	httpconfig "github.com/influxdata/telegraf/plugins/common/http"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/influxdata/telegraf/plugins/parsers"
 )
@@ -27,13 +27,14 @@ type HTTP struct {
 	// HTTP Basic Auth Credentials
 	Username string `toml:"username"`
 	Password string `toml:"password"`
-	tls.ClientConfig
+
+	// Absolute path to file with Bearer token
+	BearerToken string `toml:"bearer_token"`
 
 	SuccessStatusCodes []int `toml:"success_status_codes"`
 
-	Timeout internal.Duration `toml:"timeout"`
-
 	client *http.Client
+	httpconfig.HTTPClientConfig
 
 	// The parser will automatically be set by Telegraf core code because
 	// this plugin implements the ParserInput interface (i.e. the SetParser method)
@@ -52,6 +53,10 @@ var sampleConfig = `
   ## Optional HTTP headers
   # headers = {"X-Special-Header" = "Special-Value"}
 
+  ## Optional file with Bearer token
+  ## file content is added as an Authorization header
+  # bearer_token = "/path/to/file"
+
   ## Optional HTTP Basic Auth Credentials
   # username = "username"
   # password = "pa$$word"
@@ -62,6 +67,15 @@ var sampleConfig = `
   ## HTTP Content-Encoding for write request body, can be set to "gzip" to
   ## compress body or "identity" to apply no encoding.
   # content_encoding = "identity"
+
+  ## HTTP Proxy support
+  # http_proxy_url = ""
+
+  ## OAuth2 Client Credentials Grant
+  # client_id = "clientid"
+  # client_secret = "secret"
+  # token_url = "https://indentityprovider/oauth2/v1/token"
+  # scopes = ["urn:opc:idm:__myscopes__"]
 
   ## Optional TLS Config
   # tls_ca = "/etc/telegraf/ca.pem"
@@ -94,18 +108,13 @@ func (*HTTP) Description() string {
 }
 
 func (h *HTTP) Init() error {
-	tlsCfg, err := h.ClientConfig.TLSConfig()
+	ctx := context.Background()
+	client, err := h.HTTPClientConfig.CreateClient(ctx)
 	if err != nil {
 		return err
 	}
 
-	h.client = &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsCfg,
-			Proxy:           http.ProxyFromEnvironment,
-		},
-		Timeout: h.Timeout.Duration,
-	}
+	h.client = client
 
 	// Set default as [200]
 	if len(h.SuccessStatusCodes) == 0 {
@@ -158,6 +167,15 @@ func (h *HTTP) gatherURL(
 	request, err := http.NewRequest(h.Method, url, body)
 	if err != nil {
 		return err
+	}
+
+	if h.BearerToken != "" {
+		token, err := ioutil.ReadFile(h.BearerToken)
+		if err != nil {
+			return err
+		}
+		bearer := "Bearer " + strings.Trim(string(token), "\n")
+		request.Header.Set("Authorization", bearer)
 	}
 
 	if h.ContentEncoding == "gzip" {
@@ -232,8 +250,7 @@ func makeRequestBodyReader(contentEncoding, body string) (io.ReadCloser, error) 
 func init() {
 	inputs.Add("http", func() telegraf.Input {
 		return &HTTP{
-			Timeout: internal.Duration{Duration: time.Second * 5},
-			Method:  "GET",
+			Method: "GET",
 		}
 	})
 }

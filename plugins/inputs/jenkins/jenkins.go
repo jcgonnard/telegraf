@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/filter"
-	"github.com/influxdata/telegraf/internal"
-	"github.com/influxdata/telegraf/internal/tls"
+	"github.com/influxdata/telegraf/plugins/common/tls"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
@@ -25,19 +25,21 @@ type Jenkins struct {
 	Source   string
 	Port     string
 	// HTTP Timeout specified as a string - 3s, 1m, 1h
-	ResponseTimeout internal.Duration
+	ResponseTimeout config.Duration
 
 	tls.ClientConfig
 	client *client
 
 	Log telegraf.Logger
 
-	MaxConnections    int               `toml:"max_connections"`
-	MaxBuildAge       internal.Duration `toml:"max_build_age"`
-	MaxSubJobDepth    int               `toml:"max_subjob_depth"`
-	MaxSubJobPerLayer int               `toml:"max_subjob_per_layer"`
-	JobExclude        []string          `toml:"job_exclude"`
-	jobFilter         filter.Filter
+	MaxConnections    int             `toml:"max_connections"`
+	MaxBuildAge       config.Duration `toml:"max_build_age"`
+	MaxSubJobDepth    int             `toml:"max_subjob_depth"`
+	MaxSubJobPerLayer int             `toml:"max_subjob_per_layer"`
+	JobExclude        []string        `toml:"job_exclude"`
+	JobInclude        []string        `toml:"job_include"`
+	jobFilterExclude  filter.Filter
+	jobFilterInclude  filter.Filter
 
 	NodeExclude []string `toml:"node_exclude"`
 	nodeFilter  filter.Filter
@@ -73,15 +75,18 @@ const sampleConfig = `
 
   ## Optional Sub Job Per Layer
   ## In workflow-multibranch-plugin, each branch will be created as a sub job.
-  ## This config will limit to call only the lasted branches in each layer, 
+  ## This config will limit to call only the lasted branches in each layer,
   ## empty will use default value 10
   # max_subjob_per_layer = 10
 
-  ## Jobs to exclude from gathering
-  # job_exclude = [ "job1", "job2/subjob1/subjob2", "job3/*"]
+  ## Jobs to include or exclude from gathering
+  ## When using both lists, job_exclude has priority.
+  ## Wildcards are supported: [ "jobA/*", "jobB/subjob1/*"]
+  # job_include = [ "*" ]
+  # job_exclude = [ ]
 
   ## Nodes to exclude from gathering
-  # node_exclude = [ "node1", "node2" ]
+  # node_exclude = [ ]
 
   ## Worker pool for jenkins plugin only
   ## Empty this field will use default value 5
@@ -90,8 +95,9 @@ const sampleConfig = `
 
 // measurement
 const (
-	measurementNode = "jenkins_node"
-	measurementJob  = "jenkins_job"
+	measurementJenkins = "jenkins"
+	measurementNode    = "jenkins_node"
+	measurementJob     = "jenkins_job"
 )
 
 // SampleConfig implements telegraf.Input interface
@@ -132,11 +138,11 @@ func (j *Jenkins) newHTTPClient() (*http.Client, error) {
 			TLSClientConfig: tlsCfg,
 			MaxIdleConns:    j.MaxConnections,
 		},
-		Timeout: j.ResponseTimeout.Duration,
+		Timeout: time.Duration(j.ResponseTimeout),
 	}, nil
 }
 
-// seperate the client as dependency to use httptest Client for mocking
+// separate the client as dependency to use httptest Client for mocking
 func (j *Jenkins) initialize(client *http.Client) error {
 	var err error
 
@@ -156,8 +162,13 @@ func (j *Jenkins) initialize(client *http.Client) error {
 	}
 	j.Source = u.Hostname()
 
-	// init job filter
-	j.jobFilter, err = filter.Compile(j.JobExclude)
+	// init job filters
+	j.jobFilterExclude, err = filter.Compile(j.JobExclude)
+	if err != nil {
+		return fmt.Errorf("error compile job filters[%s]: %v", j.URL, err)
+	}
+
+	j.jobFilterInclude, err = filter.Compile(j.JobInclude)
 	if err != nil {
 		return fmt.Errorf("error compile job filters[%s]: %v", j.URL, err)
 	}
@@ -186,7 +197,6 @@ func (j *Jenkins) initialize(client *http.Client) error {
 }
 
 func (j *Jenkins) gatherNodeData(n node, acc telegraf.Accumulator) error {
-
 	tags := map[string]string{}
 	if n.DisplayName == "" {
 		return fmt.Errorf("error empty node name")
@@ -238,12 +248,20 @@ func (j *Jenkins) gatherNodeData(n node, acc telegraf.Accumulator) error {
 }
 
 func (j *Jenkins) gatherNodesData(acc telegraf.Accumulator) {
-
 	nodeResp, err := j.client.getAllNodes(context.Background())
 	if err != nil {
 		acc.AddError(err)
 		return
 	}
+
+	// get total and busy executors
+	tags := map[string]string{"source": j.Source, "port": j.Port}
+	fields := make(map[string]interface{})
+	fields["busy_executors"] = nodeResp.BusyExecutors
+	fields["total_executors"] = nodeResp.TotalExecutors
+
+	acc.AddFields(measurementJenkins, fields, tags)
+
 	// get node data
 	for _, node := range nodeResp.Computers {
 		err = j.gatherNodeData(node, acc)
@@ -277,24 +295,18 @@ func (j *Jenkins) gatherJobs(acc telegraf.Accumulator) {
 	wg.Wait()
 }
 
-// wrap the tcp request with doGet
-// block tcp request if buffered channel is full
-func (j *Jenkins) doGet(tcp func() error) error {
-	j.semaphore <- struct{}{}
-	if err := tcp(); err != nil {
-		<-j.semaphore
-		return err
-	}
-	<-j.semaphore
-	return nil
-}
-
 func (j *Jenkins) getJobDetail(jr jobRequest, acc telegraf.Accumulator) error {
 	if j.MaxSubJobDepth > 0 && jr.layer == j.MaxSubJobDepth {
 		return nil
 	}
+
+	// filter out not included job.
+	if j.jobFilterInclude != nil && !j.jobFilterInclude.Match(jr.hierarchyName()) {
+		return nil
+	}
+
 	// filter out excluded job.
-	if j.jobFilter != nil && j.jobFilter.Match(jr.hierarchyName()) {
+	if j.jobFilterExclude != nil && j.jobFilterExclude.Match(jr.hierarchyName()) {
 		return nil
 	}
 
@@ -341,7 +353,7 @@ func (j *Jenkins) getJobDetail(jr jobRequest, acc telegraf.Accumulator) error {
 
 	// stop if build is too old
 	// Higher up in gatherJobs
-	cutoff := time.Now().Add(-1 * j.MaxBuildAge.Duration)
+	cutoff := time.Now().Add(-1 * time.Duration(j.MaxBuildAge))
 
 	// Here we just test
 	if build.GetTimestamp().Before(cutoff) {
@@ -353,7 +365,9 @@ func (j *Jenkins) getJobDetail(jr jobRequest, acc telegraf.Accumulator) error {
 }
 
 type nodeResponse struct {
-	Computers []node `json:"computer"`
+	Computers      []node `json:"computer"`
+	BusyExecutors  int    `json:"busyExecutors"`
+	TotalExecutors int    `json:"totalExecutors"`
 }
 
 type node struct {
@@ -407,12 +421,13 @@ type jobBuild struct {
 type buildResponse struct {
 	Building  bool   `json:"building"`
 	Duration  int64  `json:"duration"`
+	Number    int64  `json:"number"`
 	Result    string `json:"result"`
 	Timestamp int64  `json:"timestamp"`
 }
 
 func (b *buildResponse) GetTimestamp() time.Time {
-	return time.Unix(0, int64(b.Timestamp)*int64(time.Millisecond))
+	return time.Unix(0, b.Timestamp*int64(time.Millisecond))
 }
 
 const (
@@ -427,15 +442,25 @@ type jobRequest struct {
 }
 
 func (jr jobRequest) combined() []string {
-	return append(jr.parents, jr.name)
+	path := make([]string, len(jr.parents))
+	copy(path, jr.parents)
+	return append(path, jr.name)
+}
+
+func (jr jobRequest) combinedEscaped() []string {
+	jobs := jr.combined()
+	for index, job := range jobs {
+		jobs[index] = url.PathEscape(job)
+	}
+	return jobs
 }
 
 func (jr jobRequest) URL() string {
-	return "/job/" + strings.Join(jr.combined(), "/job/") + jobPath
+	return "/job/" + strings.Join(jr.combinedEscaped(), "/job/") + jobPath
 }
 
 func (jr jobRequest) buildURL(number int64) string {
-	return "/job/" + strings.Join(jr.combined(), "/job/") + "/" + strconv.Itoa(int(number)) + jobPath
+	return "/job/" + strings.Join(jr.combinedEscaped(), "/job/") + "/" + strconv.Itoa(int(number)) + jobPath
 }
 
 func (jr jobRequest) hierarchyName() string {
@@ -451,6 +476,7 @@ func (j *Jenkins) gatherJobBuild(jr jobRequest, b *buildResponse, acc telegraf.A
 	fields := make(map[string]interface{})
 	fields["duration"] = b.Duration
 	fields["result_code"] = mapResultCode(b.Result)
+	fields["number"] = b.Number
 
 	acc.AddFields(measurementJob, fields, tags, b.GetTimestamp())
 }
@@ -475,7 +501,7 @@ func mapResultCode(s string) int {
 func init() {
 	inputs.Add("jenkins", func() telegraf.Input {
 		return &Jenkins{
-			MaxBuildAge:       internal.Duration{Duration: time.Duration(time.Hour)},
+			MaxBuildAge:       config.Duration(time.Hour),
 			MaxConnections:    5,
 			MaxSubJobPerLayer: 10,
 		}
