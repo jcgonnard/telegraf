@@ -94,9 +94,8 @@ require (
 	github.com/moby/ipvs v1.0.1
 	github.com/multiplay/go-ts3 v1.0.0
 	github.com/naoina/go-stringutil v0.1.0 // indirect
-	github.com/nats-io/jwt v1.2.2 // indirect
-	github.com/nats-io/nats-server/v2 v2.1.4
-	github.com/nats-io/nats.go v1.10.0
+	github.com/nats-io/nats-server/v2 v2.2.6
+	github.com/nats-io/nats.go v1.11.0
 	github.com/newrelic/newrelic-telemetry-sdk-go v0.5.1
 	github.com/nsqio/go-nsq v1.0.8
 	github.com/openconfig/gnmi v0.0.0-20180912164834-33a1865c3029
@@ -110,7 +109,7 @@ require (
 	github.com/riemann/riemann-go-client v0.5.0
 	github.com/safchain/ethtool v0.0.0-20200218184317-f459e2d13664
 	github.com/sensu/sensu-go/api/core/v2 v2.6.0
-	github.com/shirou/gopsutil v3.21.3+incompatible
+	github.com/shirou/gopsutil v3.21.6-0.20210624221800-cb512c850043+incompatible
 	github.com/shopspring/decimal v0.0.0-20200105231215-408a2507e114 // indirect
 	github.com/signalfx/golib/v3 v3.3.34
 	github.com/sirupsen/logrus v1.7.0
